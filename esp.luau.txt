@@ -1,0 +1,1022 @@
+if getgenv().ESP then
+    pcall(getgenv().ESP)
+    task.wait(0.25)
+end
+
+local Players      = game:GetService("Players")
+local UIS          = game:GetService("UserInputService")
+local RunService   = game:GetService("RunService")
+local Workspace    = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SoundService = game:GetService("SoundService")
+local VIM          = game:GetService("VirtualInputManager")
+local LP = Players.LocalPlayer
+
+local CONFIG = {
+    ESPEnabled        = true,
+    Interval          = 0.5,
+    Murderer          = Color3.fromRGB(255, 40, 40),
+    Sheriff           = Color3.fromRGB(40, 130, 255),
+    Innocent          = Color3.fromRGB(40, 220, 80),
+    GunColor          = Color3.fromRGB(255, 220, 60),
+    LeadTime          = 0.15,
+    SettleTime        = 0.08,
+    ExpandHitboxes    = true,
+    HitboxSize        = 6,
+
+    AutoRestartOnRound = true,
+    RestartDelay       = 2,
+    RestartDebounce    = 4,
+
+    ShowFPS           = true,
+
+    GunDropSoundEnabled = false,
+    GunDropSoundVolume  = 3,
+    GunDropSoundId      = "rbxasset://sounds/electronicpingshort.wav",
+
+    SoundEnabled      = true,
+    SoundMasterVolume = 1.8,
+    SoundPitchJitter  = 0.06,
+
+    EQ_Low            = 12,
+    EQ_Mid            = 4,
+    EQ_High           = -10,
+
+    ReverbDensity     = 0.85,
+    ReverbDiffusion   = 0.75,
+    ReverbDecay       = 0.28,
+    ReverbWet         = 0.14,
+
+    CompThreshold     = -20,
+    CompRatio         = 4,
+    CompMakeup        = 6,
+
+    SoundLayers = {
+        { id = "rbxasset://sounds/switch3.wav", volume = 4.0, pitch = 0.32 },
+        { id = "rbxasset://sounds/button.wav",  volume = 2.5, pitch = 0.55 },
+        { id = "rbxasset://sounds/switch.wav",  volume = 1.2, pitch = 1.05 },
+    },
+}
+
+local State = {
+    Running     = true,
+    PlayerHL    = {},
+    TrackedChar = {},
+    LastRole    = {},
+    GunHL       = {},
+    Connections = {},
+    CoinParts   = {},
+    CoinRestore = {},
+}
+
+local HitboxState = {
+    Parts = {},
+}
+
+local SilentAim = {
+    Locked       = false,
+    Target       = nil,
+    AimPos       = nil,
+    CameraConn   = nil,
+    LockStart    = 0,
+}
+
+local RestartState = {
+    LastFired = 0,
+    InProgress = false,
+}
+
+local function track(c)
+    table.insert(State.Connections, c)
+end
+
+local SoundState = {
+    Group   = nil,
+    Playing = {},
+}
+
+local function initSoundGroup()
+    if SoundState.Group and SoundState.Group.Parent then
+        pcall(function() SoundState.Group:Destroy() end)
+    end
+    pcall(function()
+        local g = Instance.new("SoundGroup")
+        g.Name = "_MM2ESP_ThockGroup"
+        g.Volume = CONFIG.SoundMasterVolume
+        g.Parent = SoundService
+
+        local eq = Instance.new("EqualizerSoundEffect")
+        eq.LowGain  = CONFIG.EQ_Low
+        eq.MidGain  = CONFIG.EQ_Mid
+        eq.HighGain = CONFIG.EQ_High
+        eq.Parent = g
+
+        local rv = Instance.new("ReverbSoundEffect")
+        rv.Density   = CONFIG.ReverbDensity
+        rv.Diffusion = CONFIG.ReverbDiffusion
+        rv.DecayTime = CONFIG.ReverbDecay
+        rv.WetLevel  = CONFIG.ReverbWet
+        rv.DryLevel  = 0.95
+        rv.Parent = g
+
+        local comp = Instance.new("CompressorSoundEffect")
+        comp.Threshold = CONFIG.CompThreshold
+        comp.Ratio     = CONFIG.CompRatio
+        pcall(function() comp.MakeupGain = CONFIG.CompMakeup end)
+        comp.Parent = g
+
+        SoundState.Group = g
+    end)
+end
+
+local function playThock()
+    if not CONFIG.SoundEnabled then return end
+    pcall(function()
+        local jitter = (math.random() - 0.5) * 2 * CONFIG.SoundPitchJitter
+        for _, layer in ipairs(CONFIG.SoundLayers) do
+            local s = Instance.new("Sound")
+            s.SoundId = layer.id
+            s.Volume = layer.volume
+            s.PlaybackSpeed = layer.pitch + jitter
+            s.SoundGroup = SoundState.Group
+            s.Parent = SoundService
+            s:Play()
+            table.insert(SoundState.Playing, s)
+            task.delay(3, function()
+                if s and s.Parent then s:Destroy() end
+            end)
+        end
+    end)
+end
+
+local function playGunDropSound()
+    if not CONFIG.GunDropSoundEnabled then return end
+    pcall(function()
+        local s1 = Instance.new("Sound")
+        s1.SoundId = CONFIG.GunDropSoundId
+        s1.Volume = CONFIG.GunDropSoundVolume
+        s1.PlaybackSpeed = 0.75
+        s1.Parent = SoundService
+        s1:Play()
+        table.insert(SoundState.Playing, s1)
+        task.delay(3, function()
+            if s1 and s1.Parent then s1:Destroy() end
+        end)
+    end)
+    task.delay(0.08, function()
+        pcall(function()
+            local s2 = Instance.new("Sound")
+            s2.SoundId = CONFIG.GunDropSoundId
+            s2.Volume = CONFIG.GunDropSoundVolume
+            s2.PlaybackSpeed = 1.05
+            s2.Parent = SoundService
+            s2:Play()
+            table.insert(SoundState.Playing, s2)
+            task.delay(3, function()
+                if s2 and s2.Parent then s2:Destroy() end
+            end)
+        end)
+    end)
+end
+
+initSoundGroup()
+
+local FPS = { Gui = nil, Label = nil, PingLabel = nil, Conn = nil, Frames = 0 }
+
+local function destroyFPS()
+    if FPS.Conn then pcall(function() FPS.Conn:Disconnect() end) FPS.Conn = nil end
+    if FPS.Gui and FPS.Gui.Parent then pcall(function() FPS.Gui:Destroy() end) end
+    FPS.Gui, FPS.Label, FPS.PingLabel, FPS.Frames = nil, nil, nil, 0
+end
+
+local function initFPS()
+    destroyFPS()
+    if not CONFIG.ShowFPS then return end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "_MM2ESP_FPS"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.DisplayOrder = 999
+    gui.Parent = LP:WaitForChild("PlayerGui")
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(0, 100, 0, 18)
+    lbl.Position = UDim2.new(0, 8, 0, 58)
+    lbl.BackgroundTransparency = 1
+    lbl.Font = Enum.Font.Code
+    lbl.TextSize = 14
+    lbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+    lbl.TextStrokeTransparency = 0
+    lbl.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Text = "FPS: --"
+    lbl.Parent = gui
+
+    local plbl = Instance.new("TextLabel")
+    plbl.Size = UDim2.new(0, 100, 0, 18)
+    plbl.Position = UDim2.new(0, 8, 0, 76)
+    plbl.BackgroundTransparency = 1
+    plbl.Font = Enum.Font.Code
+    plbl.TextSize = 14
+    plbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+    plbl.TextStrokeTransparency = 0
+    plbl.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    plbl.TextXAlignment = Enum.TextXAlignment.Left
+    plbl.Text = "Ping: --"
+    plbl.Parent = gui
+
+    FPS.Gui = gui
+    FPS.Label = lbl
+    FPS.PingLabel = plbl
+    FPS.Conn = RunService.RenderStepped:Connect(function()
+        FPS.Frames = FPS.Frames + 1
+    end)
+end
+
+initFPS()
+
+task.spawn(function()
+    while State.Running do
+        task.wait(0.25)
+        if FPS.Label and FPS.Label.Parent then
+            FPS.Label.Text = "FPS: " .. math.floor(FPS.Frames * 4 + 0.5)
+        end
+        FPS.Frames = 0
+
+        if FPS.PingLabel and FPS.PingLabel.Parent then
+            local ok, val = pcall(function()
+                return LP:GetNetworkPing() * 2000
+            end)
+            if ok and val then
+                FPS.PingLabel.Text = "Ping: " .. math.floor(val + 0.5) .. " ms"
+            else
+                FPS.PingLabel.Text = "Ping: --"
+            end
+        end
+    end
+end)
+
+local lastGunSound = 0
+local function notifyGunDrop()
+    local now = tick()
+    if now - lastGunSound < 2 then return end
+    lastGunSound = now
+    playGunDropSound()
+end
+
+local function isInAnyCharacter(obj)
+    local p = obj
+    for _ = 1, 8 do
+        p = p.Parent
+        if not p then return false end
+        if p:IsA("Model") and Players:GetPlayerFromCharacter(p) then
+            return true
+        end
+    end
+    return false
+end
+
+local function detectRole(plr)
+    local char = plr.Character
+    if not char then return nil end
+
+    local wc = Workspace:FindFirstChild(plr.Name)
+    if wc then
+        if wc:FindFirstChild("Gun")   then return "Sheriff"  end
+        if wc:FindFirstChild("Knife") then return "Murderer" end
+    end
+
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool then
+        local n = tool.Name:lower()
+        if n:find("knife") then return "Murderer" end
+        if n:find("gun") or n:find("revolver") or n:find("pistol") then return "Sheriff" end
+    end
+
+    local bp = plr:FindFirstChild("Backpack")
+    if bp then
+        for _, t in ipairs(bp:GetChildren()) do
+            if t:IsA("Tool") then
+                local n = t.Name:lower()
+                if n:find("knife") then return "Murderer" end
+                if n:find("gun") or n:find("revolver") or n:find("pistol") then return "Sheriff" end
+            end
+        end
+    end
+
+    return "Innocent"
+end
+
+local function isGunName(name)
+    local n = name:lower()
+    return n:find("gun") or n:find("revolver") or n:find("pistol")
+end
+
+local function findGun()
+    local char = LP.Character
+    if char then
+        for _, t in ipairs(char:GetChildren()) do
+            if t:IsA("Tool") and isGunName(t.Name) then
+                return t
+            end
+        end
+    end
+    local bp = LP:FindFirstChild("Backpack")
+    if bp then
+        for _, t in ipairs(bp:GetChildren()) do
+            if t:IsA("Tool") and isGunName(t.Name) then
+                return t
+            end
+        end
+    end
+    return nil
+end
+
+local function applyHitboxExpansion(char)
+    if not CONFIG.ExpandHitboxes then return end
+    if not char or not char.Parent then return end
+    if HitboxState.Parts[char] then return end
+
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    local expander = Instance.new("Part")
+    expander.Name         = "_ESP_HitboxExpander"
+    expander.Size         = Vector3.new(CONFIG.HitboxSize, CONFIG.HitboxSize, CONFIG.HitboxSize)
+    expander.Transparency = 1
+    expander.CanCollide   = false
+    expander.CanQuery     = true
+    expander.CanTouch     = false
+    expander.Massless     = true
+    expander.Anchored     = false
+    expander.CFrame       = hrp.CFrame
+    expander.Parent       = char
+
+    local weld = Instance.new("WeldConstraint")
+    weld.Part0 = hrp
+    weld.Part1 = expander
+    weld.Parent = expander
+
+    HitboxState.Parts[char] = expander
+end
+
+local function removeHitboxExpansion(char)
+    local part = HitboxState.Parts[char]
+    if part and part.Parent then
+        part:Destroy()
+    end
+    HitboxState.Parts[char] = nil
+end
+
+local function destroyPlayerHL(plr)
+    local h = State.PlayerHL[plr]
+    if h then h:Destroy() end
+    State.PlayerHL[plr] = nil
+
+    local c = State.TrackedChar[plr]
+    if c then removeHitboxExpansion(c) end
+
+    State.TrackedChar[plr] = nil
+    State.LastRole[plr] = nil
+end
+
+local function updatePlayer(plr)
+    if plr == LP then
+        destroyPlayerHL(plr)
+        return
+    end
+
+    if not CONFIG.ESPEnabled then
+        destroyPlayerHL(plr)
+        return
+    end
+
+    local char = plr.Character
+    if not char or not char.Parent then
+        destroyPlayerHL(plr)
+        return
+    end
+
+    if State.TrackedChar[plr] ~= char then
+        destroyPlayerHL(plr)
+        State.TrackedChar[plr] = char
+    end
+
+    applyHitboxExpansion(char)
+
+    local role = detectRole(plr)
+    if not role then return end
+
+    local h = State.PlayerHL[plr]
+    if not h or h.Parent ~= char then
+        if h then h:Destroy() end
+        h = Instance.new("Highlight")
+        h.FillTransparency = 1
+        h.OutlineTransparency = 0
+        h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        h.Adornee = char
+        h.Parent = char
+        State.PlayerHL[plr] = h
+        State.LastRole[plr] = nil
+    end
+
+    if State.LastRole[plr] ~= role then
+        local c = CONFIG[role] or CONFIG.Innocent
+        h.FillColor = c
+        h.OutlineColor = c
+        State.LastRole[plr] = role
+    end
+end
+
+local function resolveGunTarget(obj)
+    if not obj or not obj.Parent then return nil end
+    if isInAnyCharacter(obj) then return nil end
+
+    if obj:IsA("BasePart") and obj.Name == "GunDrop" then
+        return obj
+    end
+    if obj:IsA("Model") and obj.Name:lower():find("gundrop") then
+        return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart")
+    end
+    if obj:IsA("Tool") and obj.Name:lower():find("gun") then
+        return obj:FindFirstChild("Handle") or obj:FindFirstChildWhichIsA("BasePart")
+    end
+    return nil
+end
+
+local function addGunHL(obj)
+    if State.GunHL[obj] then return end
+    local part = resolveGunTarget(obj)
+    if not part then return end
+
+    local h = Instance.new("Highlight")
+    h.FillColor = CONFIG.GunColor
+    h.OutlineColor = CONFIG.GunColor
+    h.FillTransparency = 1
+    h.OutlineTransparency = 0
+    h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    h.Adornee = part
+    h.Parent = part
+
+    local bb = Instance.new("BillboardGui")
+    bb.Size = UDim2.new(0, 100, 0, 24)
+    bb.StudsOffset = Vector3.new(0, 2.5, 0)
+    bb.AlwaysOnTop = true
+    bb.Adornee = part
+    bb.Parent = part
+
+    local lbl = Instance.new("TextLabel")
+    lbl.BackgroundTransparency = 1
+    lbl.Size = UDim2.new(1, 0, 1, 0)
+    lbl.Font = Enum.Font.SourceSansBold
+    lbl.TextSize = 16
+    lbl.TextStrokeTransparency = 0
+    lbl.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+    lbl.TextColor3 = CONFIG.GunColor
+    lbl.Text = "GUN"
+    lbl.Parent = bb
+
+    State.GunHL[obj] = { highlight = h, billboard = bb }
+end
+
+local function removeGunHL(obj)
+    local e = State.GunHL[obj]
+    if e then
+        if e.highlight then e.highlight:Destroy() end
+        if e.billboard then e.billboard:Destroy() end
+    end
+    State.GunHL[obj] = nil
+end
+
+local function clearGunHLs()
+    for _, e in pairs(State.GunHL) do
+        if e.highlight then e.highlight:Destroy() end
+        if e.billboard then e.billboard:Destroy() end
+    end
+    State.GunHL = {}
+end
+
+local function purgeHeldGuns()
+    for obj in pairs(State.GunHL) do
+        if not obj.Parent or isInAnyCharacter(obj) then
+            removeGunHL(obj)
+        end
+    end
+end
+
+local function scanForGuns()
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if resolveGunTarget(obj) then
+            addGunHL(obj)
+        end
+    end
+end
+
+local function saveCoinProp(part, prop)
+    local r = State.CoinRestore[part]
+    if not r then r = {}; State.CoinRestore[part] = r end
+    if r[prop] == nil then
+        local ok, val = pcall(function() return part[prop] end)
+        if ok then r[prop] = val end
+    end
+end
+
+local function freezeCoin(coin)
+    local parts = {}
+    local function collect(node)
+        if node:IsA("BasePart") then table.insert(parts, node) end
+        for _, c in ipairs(node:GetChildren()) do collect(c) end
+    end
+    collect(coin)
+
+    for _, part in ipairs(parts) do
+        for _, prop in ipairs({"Anchored","CanCollide","CanQuery","CastShadow","Material","MaterialVariant","Reflectance"}) do
+            saveCoinProp(part, prop)
+        end
+        pcall(function()
+            part.Anchored = true
+            part.CanCollide = false
+            part.CanQuery = false
+            part.CastShadow = false
+            part.Material = Enum.Material.Plastic
+            part.MaterialVariant = ""
+            part.Reflectance = 0
+        end)
+        State.CoinParts[part] = true
+
+        for _, d in ipairs(part:GetChildren()) do
+            local dc = d.ClassName
+            if dc == "BodyAngularVelocity" or dc == "AngularVelocity"
+                or dc == "BodyGyro" or dc == "BodyVelocity" or dc == "BodyPosition"
+                or dc == "BodyThrust" or dc == "RocketPropulsion" or dc == "LinearVelocity" then
+                d:Destroy()
+            end
+        end
+    end
+
+    for _, d in ipairs(coin:GetDescendants()) do
+        if d:IsA("Script") or d:IsA("LocalScript") then
+            saveCoinProp(d, "Disabled")
+            d.Disabled = true
+        end
+    end
+end
+
+local function unfreezeAllCoins()
+    for part, props in pairs(State.CoinRestore) do
+        if part and part.Parent then
+            for prop, val in pairs(props) do
+                pcall(function() part[prop] = val end)
+            end
+        end
+    end
+    State.CoinRestore = {}
+    State.CoinParts = {}
+end
+
+local function scanForCoins()
+    for _, obj in ipairs(Workspace:GetDescendants()) do
+        if obj:IsA("BasePart") and obj.Name == "Coin_Server" then
+            freezeCoin(obj)
+        end
+    end
+end
+
+pcall(function()
+    local mt = getrawmetatable(game)
+    local old = mt.__newindex
+    setreadonly(mt, false)
+    mt.__newindex = newcclosure(function(self, key, value)
+        if checkcaller() then return old(self, key, value) end
+        if key == "CFrame" and State.CoinParts[self] then
+            return
+        end
+        if key == "CFrame" and SilentAim.Locked and SilentAim.AimPos then
+            if self == Workspace.CurrentCamera then
+                return
+            end
+        end
+        return old(self, key, value)
+    end)
+    setreadonly(mt, true)
+end)
+
+local function findMurderer()
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP and plr.Character and plr.Character.Parent then
+            if detectRole(plr) == "Murderer" then
+                return plr
+            end
+        end
+    end
+    return nil
+end
+
+local function hasClearShot(targetChar)
+    local myChar = LP.Character
+    if not myChar or not targetChar then return false end
+    local myHrp = myChar:FindFirstChild("HumanoidRootPart")
+    local targetHrp = targetChar:FindFirstChild("HumanoidRootPart")
+    if not myHrp or not targetHrp then return false end
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { myChar }
+    params.IgnoreWater = true
+
+    local result = Workspace:Raycast(myHrp.Position, targetHrp.Position - myHrp.Position, params)
+    if result then
+        if result.Instance:IsDescendantOf(targetChar) then return true end
+        if result.Instance.Name == "_ESP_HitboxExpander" and result.Instance.Parent == targetChar then
+            return true
+        end
+        return false
+    end
+    return true
+end
+
+local function getPredictedAimPos(tChar)
+    if not tChar or not tChar.Parent then return nil end
+    local head = tChar:FindFirstChild("Head")
+    local hrp  = tChar:FindFirstChild("HumanoidRootPart")
+    local aimPart = head or hrp
+    if not aimPart then return nil end
+
+    local base = aimPart.Position
+
+    if hrp then
+        local vel = hrp.AssemblyLinearVelocity
+        if vel and vel.Magnitude > 0.5 and vel.Magnitude < 60 then
+            base = base + vel * CONFIG.LeadTime
+        end
+    end
+
+    return base
+end
+
+local function stopCameraLoop()
+    if SilentAim.CameraConn then
+        pcall(function() SilentAim.CameraConn:Disconnect() end)
+        SilentAim.CameraConn = nil
+    end
+end
+
+local function resetSilentAim()
+    stopCameraLoop()
+    SilentAim.Locked = false
+    SilentAim.Target = nil
+    SilentAim.AimPos = nil
+    SilentAim.LockStart = 0
+end
+
+local function activateSilentAim()
+    if SilentAim.Locked then
+        if tick() - SilentAim.LockStart < 3 then return end
+        resetSilentAim()
+    end
+
+    local ok, err = pcall(function()
+        local char = LP.Character
+        if not char or not char.Parent then return end
+
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then return end
+
+        local target = findMurderer()
+        if not target or not target.Character then return end
+        if not hasClearShot(target.Character) then return end
+
+        local gun = findGun()
+        if not gun then return end
+
+        if gun.Parent ~= char then
+            pcall(function() hum:EquipTool(gun) end)
+            local t = tick()
+            while gun.Parent ~= char and tick() - t < 0.5 do
+                task.wait(0.02)
+            end
+            if gun.Parent ~= char then return end
+            task.wait(0.03)
+        end
+
+        local cam = Workspace.CurrentCamera
+        if not cam then return end
+
+        local savedCFrame = cam.CFrame
+        SilentAim.Target = target
+        SilentAim.Locked = true
+        SilentAim.LockStart = tick()
+
+        SilentAim.AimPos = getPredictedAimPos(target.Character)
+        if not SilentAim.AimPos then
+            resetSilentAim()
+            return
+        end
+
+        local camPos = savedCFrame.Position
+        cam.CFrame = CFrame.new(camPos, SilentAim.AimPos)
+
+        stopCameraLoop()
+        SilentAim.CameraConn = RunService.RenderStepped:Connect(function()
+            if not SilentAim.Locked then return end
+            local c = Workspace.CurrentCamera
+            if not c then return end
+            local t2 = SilentAim.Target
+            if not t2 or not t2.Character or not t2.Character.Parent then return end
+            local aim = getPredictedAimPos(t2.Character) or SilentAim.AimPos
+            SilentAim.AimPos = aim
+            c.CFrame = CFrame.new(c.CFrame.Position, aim)
+        end)
+
+        task.wait(CONFIG.SettleTime)
+
+        if target.Character and target.Character.Parent then
+            local reAim = getPredictedAimPos(target.Character)
+            if reAim then
+                SilentAim.AimPos = reAim
+                cam.CFrame = CFrame.new(cam.CFrame.Position, reAim)
+            end
+        end
+
+        task.wait(0.02)
+
+        pcall(function() gun:Activate() end)
+
+        local vp = cam.ViewportSize
+        pcall(function()
+            VIM:SendMouseButtonEvent(vp.X / 2, vp.Y / 2, 0, true, game, 1)
+        end)
+        task.wait(0.02)
+        pcall(function()
+            VIM:SendMouseButtonEvent(vp.X / 2, vp.Y / 2, 0, false, game, 1)
+        end)
+
+        playThock()
+
+        task.wait(0.1)
+
+        stopCameraLoop()
+        SilentAim.Locked = false
+        SilentAim.Target = nil
+        SilentAim.AimPos = nil
+        SilentAim.LockStart = 0
+
+        pcall(function() cam.CFrame = savedCFrame end)
+    end)
+
+    if not ok then
+        warn("[MM2ESP] Silent aim error:", err)
+        resetSilentAim()
+    end
+end
+
+local function executeGunGrab()
+    local char = LP.Character
+    if not char or not char.Parent then return end
+
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then return end
+
+    local targetGunPart = nil
+    local minDist = math.huge
+
+    for obj, _ in pairs(State.GunHL) do
+        local part = resolveGunTarget(obj)
+        if part and part.Parent then
+            local dist = (part.Position - hrp.Position).Magnitude
+            if dist < minDist then
+                minDist = dist
+                targetGunPart = part
+            end
+        end
+    end
+
+    if not targetGunPart then return end
+
+    local originalCFrame = hrp.CFrame
+    local grabCFrame = CFrame.new(targetGunPart.Position + Vector3.new(0, 1.5, 0))
+
+    hrp.CFrame = grabCFrame
+    task.wait()
+    hrp.CFrame = originalCFrame
+
+    playThock()
+end
+
+local function softRestart(reason)
+    if RestartState.InProgress then return end
+    RestartState.InProgress = true
+
+    print("[MM2ESP] Soft restart:", reason)
+
+    resetSilentAim()
+
+    for plr in pairs(State.PlayerHL) do destroyPlayerHL(plr) end
+    for plr, char in pairs(State.TrackedChar) do
+        if char then removeHitboxExpansion(char) end
+    end
+    for char, _ in pairs(HitboxState.Parts) do
+        removeHitboxExpansion(char)
+    end
+
+    State.PlayerHL = {}
+    State.TrackedChar = {}
+    State.LastRole = {}
+    State.CoinParts = {}
+    State.CoinRestore = {}
+
+    clearGunHLs()
+    State.GunHL = {}
+
+    initSoundGroup()
+
+    CONFIG.ESPEnabled = true
+    State.Running = true
+
+    scanForGuns()
+    scanForCoins()
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP and plr.Character then
+            applyHitboxExpansion(plr.Character)
+        end
+    end
+
+    task.wait(0.2)
+    RestartState.InProgress = false
+
+    print("[MM2ESP] Soft restart complete")
+end
+
+track(Workspace.DescendantAdded:Connect(function(obj)
+    if resolveGunTarget(obj) then
+        if CONFIG.ESPEnabled then addGunHL(obj) end
+        notifyGunDrop()
+    end
+    if obj:IsA("BasePart") and obj.Name == "Coin_Server" and CONFIG.ESPEnabled then
+        freezeCoin(obj)
+    end
+end))
+
+track(Workspace.DescendantRemoving:Connect(function(obj)
+    if State.GunHL[obj] then removeGunHL(obj) end
+    State.CoinParts[obj] = nil
+    State.CoinRestore[obj] = nil
+end))
+
+track(Players.PlayerRemoving:Connect(function(plr)
+    destroyPlayerHL(plr)
+    if plr.Character then removeHitboxExpansion(plr.Character) end
+end))
+
+track(Players.PlayerAdded:Connect(function(plr)
+    plr.CharacterAdded:Connect(function(c)
+        task.wait(0.5)
+        if CONFIG.ESPEnabled then applyHitboxExpansion(c) end
+    end)
+end))
+
+track(LP.CharacterAdded:Connect(function()
+    resetSilentAim()
+end))
+
+task.spawn(function()
+    while State.Running do
+        for _, plr in ipairs(Players:GetPlayers()) do
+            pcall(updatePlayer, plr)
+        end
+        task.wait(CONFIG.Interval)
+    end
+end)
+
+task.spawn(function()
+    while State.Running do
+        task.wait(0.5)
+        if CONFIG.ESPEnabled then purgeHeldGuns() end
+    end
+end)
+
+task.spawn(function()
+    while State.Running do
+        task.wait(2)
+        if CONFIG.ESPEnabled then scanForGuns() end
+    end
+end)
+
+task.spawn(function()
+    while State.Running do
+        task.wait(5)
+        if CONFIG.ESPEnabled then scanForCoins() end
+    end
+end)
+
+task.spawn(function()
+    while State.Running do
+        task.wait(1)
+        if SilentAim.Locked and SilentAim.LockStart > 0 and (tick() - SilentAim.LockStart) > 5 then
+            warn("[MM2ESP] Force-unlocking stuck silent aim")
+            resetSilentAim()
+        end
+    end
+end)
+
+task.spawn(function()
+    if not CONFIG.AutoRestartOnRound then return end
+    local remotes = ReplicatedStorage:WaitForChild("Remotes", 20)
+    if not remotes then return end
+    local gameplay = remotes:WaitForChild("Gameplay", 20)
+    if not gameplay then return end
+    local roundStart = gameplay:WaitForChild("RoundStart", 20)
+    if not roundStart or not roundStart:IsA("RemoteEvent") then return end
+
+    track(roundStart.OnClientEvent:Connect(function()
+        if not CONFIG.AutoRestartOnRound then return end
+        local now = tick()
+        if now - RestartState.LastFired < CONFIG.RestartDebounce then return end
+        RestartState.LastFired = now
+
+        task.delay(CONFIG.RestartDelay, function()
+            if not State.Running then return end
+            softRestart("RoundStart")
+        end)
+    end))
+end)
+
+local function fullCleanup()
+    State.Running = false
+    CONFIG.ESPEnabled = false
+    stopCameraLoop()
+    for _, c in ipairs(State.Connections) do
+        pcall(function() c:Disconnect() end)
+    end
+    State.Connections = {}
+
+    for plr, char in pairs(State.TrackedChar) do
+        if char then removeHitboxExpansion(char) end
+    end
+    for char, _ in pairs(HitboxState.Parts) do
+        removeHitboxExpansion(char)
+    end
+
+    for _, s in ipairs(SoundState.Playing) do
+        pcall(function() if s and s.Parent then s:Destroy() end end)
+    end
+    SoundState.Playing = {}
+
+    if SoundState.Group and SoundState.Group.Parent then
+        pcall(function() SoundState.Group:Destroy() end)
+    end
+    SoundState.Group = nil
+
+    destroyFPS()
+
+    for plr in pairs(State.PlayerHL) do destroyPlayerHL(plr) end
+    clearGunHLs()
+    unfreezeAllCoins()
+    getgenv().ESP = nil
+end
+
+track(UIS.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+
+    if input.KeyCode == Enum.KeyCode.Delete then
+        fullCleanup()
+        return
+    end
+
+    if input.KeyCode == Enum.KeyCode.Backspace then
+        CONFIG.ESPEnabled = not CONFIG.ESPEnabled
+
+        if CONFIG.ESPEnabled then
+            scanForGuns()
+            scanForCoins()
+        else
+            for plr in pairs(State.PlayerHL) do destroyPlayerHL(plr) end
+            clearGunHLs()
+            unfreezeAllCoins()
+        end
+    end
+
+    if input.KeyCode == Enum.KeyCode.F15 then
+        task.spawn(executeGunGrab)
+    end
+
+    if input.KeyCode == Enum.KeyCode.F14 then
+        task.spawn(activateSilentAim)
+    end
+end))
+
+scanForGuns()
+scanForCoins()
+
+for _, plr in ipairs(Players:GetPlayers()) do
+    if plr ~= LP and plr.Character then
+        applyHitboxExpansion(plr.Character)
+    end
+end
+
+getgenv().ESP = fullCleanup
